@@ -1,0 +1,746 @@
+openapi: 3.1.0
+info:
+  title: Nodd Public API
+  version: 0.1.0
+  description: |
+    サービス、CLI、エージェントから通知を送り、人の応答を受け取るAPIです。
+
+    すべての入力は送信キーのチャンネルに届きます。宛先のチャンネルは本文で指定しません。
+    エラーは RFC 9457 の `application/problem+json` で返し、機械向けの値は `code` に入ります。
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+servers:
+  - url: https://api.nodd.blipdrop.net
+    description: Production
+tags:
+  - name: Messages
+    description: 通知の送信と状態の確認
+  - name: Alerts
+    description: アラートの解消
+  - name: Actions
+    description: 応答イベントの取得
+  - name: Inbound
+    description: 外部サービスからの受信
+  - name: Meta
+    description: サービスの状態
+security:
+  - sendKey: []
+paths:
+  /v1/messages:
+    post:
+      tags: [Messages]
+      operationId: createMessage
+      summary: 通知を送る
+      description: |
+        受け付けた時点で `202` を返します。端末への到達は保証しません。
+        応答が必要な種類は、`GET /v1/messages/{id}`、callback、`GET /v1/actions/events` のいずれかで結果を受け取ります。
+        チャンネルが一時停止中は `403 channel_paused` を返します。`Retry-After` の秒数が過ぎると自動で戻ります。
+        プランの上限を超えたチャンネルは `403 channel_read_only` です。新しいチャンネルから止まります。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageCreate"
+            examples:
+              notice:
+                summary: お知らせ
+                value:
+                  kind: notice
+                  level: low
+                  title: バックアップが完了しました
+              approval:
+                summary: 承認
+                value:
+                  kind: approval
+                  level: high
+                  title: 本番デプロイの承認
+                  body: api v2.4.1 を本番へ反映します
+                  fields:
+                    - label: 環境
+                      value: production
+                    - label: 変更
+                      value: v2.4.0 → v2.4.1
+                  links:
+                    - label: 変更内容を見る
+                      url: https://github.com/acme/api/pull/482
+                  expires_in: 3600
+                  on_timeout: reject
+      responses:
+        "202":
+          description: 受付済み
+          headers:
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageAccepted"
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409":
+          description: "`open_actions_exceeded`。ボタンなしで届けず送信を拒否します。"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "413": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /v1/messages/{id}:
+    parameters:
+      - $ref: "#/components/parameters/MessageId"
+    get:
+      tags: [Messages]
+      operationId: getMessage
+      summary: 状態と応答を取得する
+      description: |
+        待ち受けはサーバー側で保持しません。`Retry-After` の秒数を空けて再度取得します。
+        本文はサーバーに残らないので返しません。
+      security:
+        - replyToken: []
+        - sendKey: []
+      responses:
+        "200":
+          description: 現在の状態
+          headers:
+            Retry-After:
+              description: 次に取得するまでの秒数。応答が確定すると付きません。
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageState"
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    patch:
+      tags: [Messages]
+      operationId: updateMessage
+      summary: 進捗カードを更新する
+      description: |
+        `kind: progress` の通知だけ更新できます。本文と同じく暗号化して端末へ届け、サーバーには残しません。
+        `running` の更新は通知を鳴らさず、`succeeded` と `failed` は通知します。その後の更新は `409 invalid_state` です。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageUpdate"
+      responses:
+        "202":
+          description: 受付済み
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /v1/messages/{id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/MessageId"
+    post:
+      tags: [Messages]
+      operationId: cancelMessage
+      summary: 応答待ちを取り下げる
+      description: 応答前の承認や選択を取り下げます。押された後は `409 already_claimed` を返します。
+      responses:
+        "204":
+          description: 取り下げ済み
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /v1/messages/{id}/result:
+    parameters:
+      - $ref: "#/components/parameters/MessageId"
+    post:
+      tags: [Messages]
+      operationId: reportResult
+      summary: 応答を処理した結果を報告する
+      description: 受け取った応答の処理結果を送ると、カードが `done` に変わります。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActionResult"
+      responses:
+        "204":
+          description: 記録済み
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /v1/alerts/{alert_key}/resolve:
+    parameters:
+      - name: alert_key
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/AlertKey"
+    post:
+      tags: [Alerts]
+      operationId: resolveAlert
+      summary: アラートを解消する
+      description: 同じ `alert_key` の未解消アラートを閉じ、全員の対応タブから外します。対象がなくても `202` を返します。
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                note:
+                  type: string
+                  maxLength: 200
+      responses:
+        "202":
+          description: 受付済み
+        "401": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /v1/actions/events:
+    get:
+      tags: [Actions]
+      operationId: listActionEvents
+      summary: 応答イベントを取得する
+      description: |
+        callbackを受けられないサービスが使います。`next_cursor` を次の `cursor` に渡します。
+        書き込み順の入れ替わりで読み飛ばさないよう、発生から2秒以内のイベントは次回に返します。
+      security:
+        - readKey: []
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: イベントの一覧
+          headers:
+            Retry-After:
+              description: 次に取得するまでの秒数
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events, next_cursor]
+                properties:
+                  events:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ActionEvent"
+                  next_cursor:
+                    type: string
+        "401": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /in/{integration}/{inbound_key}:
+    parameters:
+      - name: integration
+        in: path
+        required: true
+        schema:
+          type: string
+          enum: [slack, grafana, alertmanager, generic]
+      - name: inbound_key
+        in: path
+        required: true
+        description: チャンネル専用の受信キー。アクセスログには残しません。
+        schema:
+          type: string
+    post:
+      tags: [Inbound]
+      operationId: receiveInbound
+      summary: 外部サービスの通知を受ける
+      description: |
+        `slack` は Incoming Webhook の `text` を読み取ります。
+        `grafana` と `alertmanager` は発火を `alert`、回復を解消へ変換し、
+        fingerprint を `alert_key` と `dedupe_key` に使います。fingerprint がなければラベルから導きます。
+        1回で発火は20件まで届け、超えた分は件数をまとめた1件にします。
+        `generic` は `MessageCreate` と同じ形式で、`notice`、`progress`、`alert` だけを受け付けます。
+        本文は256KBまでです。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "202":
+          description: 受付済み
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "413": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /v1/meta:
+    get:
+      tags: [Meta]
+      operationId: getMeta
+      summary: サービスの状態を取得する
+      security: []
+      responses:
+        "200":
+          description: 現在の運転モード
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Meta"
+webhooks:
+  actionEvent:
+    post:
+      summary: 応答や状態の変化を受け取る
+      description: |
+        チャンネルに登録し、所有確認を済ませたURLへ送ります。
+        `2xx` 以外と10秒のタイムアウトは失敗とし、1分、5分、30分と間隔を空けて最長24時間再送します。
+        リダイレクトは追いません。同じイベントが複数回届く場合があるので `Nodd-Event-Id` で重複を除きます。
+
+        登録時は `{"type":"verification","challenge":"..."}` を署名なしで送ります。
+        `2xx` の本文に `challenge` の値を含めて返したURLだけを登録します。
+        httpsの443番で、公開アドレスに解決できる名前付きホストだけを受け付けます。
+
+        期限切れは応答の受付猶予10分が過ぎた後に通知します。
+        Teamでは、受け取り期限までに誰の受信も確認できなかった通知を `delivery.expired` で知らせます。
+
+        署名は `Nodd-Signature: t=<unix秒>,v1=<hex>` です。
+        `v1` は `<t>.<raw body>` のHMAC-SHA256で、受信側は5分より古い `t` を拒否します。
+      security: []
+      parameters:
+        - name: Nodd-Signature
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: Nodd-Event-Id
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActionEvent"
+      responses:
+        "200":
+          description: 受領
+components:
+  securitySchemes:
+    sendKey:
+      type: http
+      scheme: bearer
+      description: チャンネル専用の送信キー。`nodd_live_` または `nodd_test_` で始まり、末尾に検査値を持ちます。
+    readKey:
+      type: http
+      scheme: bearer
+      description: 応答イベントを読むためのチャンネル専用キー。送信はできません。
+    replyToken:
+      type: http
+      scheme: bearer
+      description: 送信時に返す、その1通の状態だけを読めるトークン。
+  parameters:
+    MessageId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^msg_[0-9A-Za-z]{26}$"
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: 再送時に二重送信を防ぐキー。24時間有効で、同じキーには最初の結果を返します。
+      schema:
+        type: string
+        maxLength: 128
+  headers:
+    RateLimitRemaining:
+      description: 現在の時間枠で残っている送信数
+      schema:
+        type: integer
+  responses:
+    Problem:
+      description: エラー
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    RateLimited:
+      description: "`rate_limited` または `monthly_limit`"
+      headers:
+        Retry-After:
+          description: 再送までの秒数
+          schema:
+            type: integer
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Unavailable:
+      description: "`maintenance` または `overloaded`"
+      headers:
+        Retry-After:
+          description: 再送までの秒数
+          schema:
+            type: integer
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    AlertKey:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: "^[0-9A-Za-z._:-]+$"
+    Field:
+      type: object
+      additionalProperties: false
+      required: [label, value]
+      properties:
+        label:
+          type: string
+          maxLength: 24
+        value:
+          type: string
+          maxLength: 80
+    Link:
+      type: object
+      additionalProperties: false
+      required: [label, url]
+      properties:
+        label:
+          type: string
+          maxLength: 24
+        url:
+          type: string
+          format: uri
+          pattern: "^https://"
+          maxLength: 512
+    Option:
+      type: object
+      additionalProperties: false
+      required: [id, label]
+      properties:
+        id:
+          type: string
+          maxLength: 32
+        label:
+          type: string
+          maxLength: 16
+        style:
+          type: string
+          enum: [default, primary, destructive]
+          default: default
+    Audience:
+      type: object
+      additionalProperties: false
+      description: 省略するとチャンネルの全員に届きます。宛先の人にだけ対応タブの件数が増えます。
+      properties:
+        members:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+        roles:
+          type: array
+          items:
+            type: string
+            enum: [manager, responder]
+    Progress:
+      type: object
+      additionalProperties: false
+      required: [current, total]
+      properties:
+        current:
+          type: integer
+          minimum: 0
+        total:
+          type: integer
+          minimum: 1
+        label:
+          type: string
+          maxLength: 40
+        state:
+          type: string
+          enum: [running, succeeded, failed]
+          default: running
+    MessageCreate:
+      type: object
+      additionalProperties: false
+      required: [kind, title]
+      properties:
+        kind:
+          type: string
+          enum: [notice, progress, alert, approval, choice]
+          description: "`input` は次の版で追加します。"
+        level:
+          type: string
+          enum: [low, normal, high]
+          default: normal
+          description: "`critical` は将来の予約です。iOSのPassive、Active、Time Sensitiveに対応します。"
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+        body:
+          type: string
+          maxLength: 1000
+        fields:
+          type: array
+          maxItems: 6
+          items:
+            $ref: "#/components/schemas/Field"
+        links:
+          type: array
+          maxItems: 2
+          items:
+            $ref: "#/components/schemas/Link"
+        options:
+          type: array
+          description: "`choice` では2〜4個を必須とします。`approval` では指定しません。"
+          minItems: 2
+          maxItems: 4
+          items:
+            $ref: "#/components/schemas/Option"
+        confirm:
+          type: boolean
+          description: "応答にFace IDを求めます。`approval` の既定は `true`、`choice` の既定は `false` です。"
+        expires_in:
+          type: integer
+          minimum: 60
+          maximum: 2592000
+          description: 応答期限までの秒数。プランの受け取り期限を超えられません。応答が必要な種類で省略すると受け取り期限になります。
+        on_timeout:
+          type: string
+          enum: [reject, ignore]
+          default: reject
+          description: 期限切れの扱い。サービスは未応答を承認として扱ってはいけません。
+        alert_key:
+          $ref: "#/components/schemas/AlertKey"
+        dedupe_key:
+          type: string
+          maxLength: 128
+          description: 未解決の同じキーを1件にまとめ、回数を数えます。上限には数えません。
+        progress:
+          $ref: "#/components/schemas/Progress"
+        to:
+          $ref: "#/components/schemas/Audience"
+        sensitive:
+          type: boolean
+          default: false
+          description: ロック画面に本文を出しません。
+        delivery:
+          type: string
+          enum: [immediate, digest]
+          default: immediate
+          description: "`digest` は1時間ごとのまとめ通知へ回します。`low` だけ指定できます。本文はその間も同期で取得できます。"
+        metadata:
+          type: object
+          description: 応答イベントにそのまま返す値。1KBまでです。
+          additionalProperties:
+            type: string
+    MessageUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          maxLength: 120
+        progress:
+          $ref: "#/components/schemas/Progress"
+    MessageAccepted:
+      type: object
+      required: [id, status, reply_token, sent_at]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [queued]
+        reply_token:
+          type: string
+        sent_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        deduped:
+          type: boolean
+    ActionState:
+      type: string
+      enum: [open, claimed, delivered, done, expired, failed, cancelled]
+    Response:
+      type: object
+      required: [option_id, actor, assurance, responded_at, signature]
+      properties:
+        option_id:
+          type: string
+          description: "`approval` では `approve` か `reject` です。"
+        actor:
+          type: object
+          required: [id, display_name]
+          properties:
+            id:
+              type: string
+            display_name:
+              type: string
+        assurance:
+          type: string
+          enum: [none, biometric]
+        responded_at:
+          type: string
+          format: date-time
+          description: 端末が署名した時刻です。
+        signature:
+          type: object
+          description: サーバーを信用せずに検証できる端末の署名です。
+          required: [alg, key_id, value, nonce]
+          properties:
+            alg:
+              type: string
+              enum: [ES256]
+            key_id:
+              type: string
+            value:
+              type: string
+            nonce:
+              type: string
+              description: 署名対象に含まれる値です。`responded_at` は端末が署名した文字列のまま返します。
+    Delivery:
+      type: object
+      description: 推定値です。`unconfirmed` は届いていないという意味ではありません。
+      properties:
+        confirmed:
+          type: integer
+        delayed:
+          type: integer
+        unconfirmed:
+          type: integer
+        failed:
+          type: integer
+    MessageState:
+      type: object
+      required: [id, kind, sent_at, delivery]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+        source:
+          type: string
+          description: サーバーが記録する経路です。送信者は指定できません。
+          enum: [api, cli, github_action, mcp, slack, grafana, alertmanager, generic]
+        sent_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        action_state:
+          $ref: "#/components/schemas/ActionState"
+        response:
+          $ref: "#/components/schemas/Response"
+        delivery:
+          $ref: "#/components/schemas/Delivery"
+        resolved_at:
+          type: string
+          format: date-time
+    ActionResult:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [succeeded, failed]
+        summary:
+          type: string
+          maxLength: 200
+    ActionEvent:
+      type: object
+      required: [id, type, occurred_at, message_id]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [action.responded, action.expired, action.cancelled, delivery.expired]
+        occurred_at:
+          type: string
+          format: date-time
+        message_id:
+          type: string
+        response:
+          $ref: "#/components/schemas/Response"
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+        on_timeout:
+          type: string
+          enum: [reject, ignore]
+          description: "`action.expired` だけに付きます。送信時に指定した扱いです。"
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+        code:
+          type: string
+          enum:
+            - invalid_key
+            - key_revoked
+            - forbidden
+            - validation_failed
+            - payload_too_large
+            - unsupported_level
+            - rate_limited
+            - monthly_limit
+            - channel_paused
+            - open_actions_exceeded
+            - already_claimed
+            - action_expired
+            - invalid_state
+            - not_found
+            - plan_required
+            - channel_read_only
+            - maintenance
+            - overloaded
+            - internal
+        detail:
+          type: string
+        request_id:
+          type: string
+    Meta:
+      type: object
+      required: [mode, api_version]
+      properties:
+        mode:
+          type: string
+          enum: [normal, degraded, read_only, intake_stopped]
+        api_version:
+          type: string
+        notice:
+          type: string
