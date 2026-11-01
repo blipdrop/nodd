@@ -19,14 +19,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
       - run: cargo test --locked
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - run: tar -czf nodd-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release nodd
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: nodd-${{ matrix.target }}
           path: nodd-${{ matrix.target }}.tar.gz
@@ -37,7 +37,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
       - run: sha256sum nodd-*.tar.gz > checksums.txt
