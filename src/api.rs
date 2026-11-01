@@ -38,7 +38,7 @@ impl ApiError {
 impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ApiError::Network(message) => write!(f, "サーバーに接続できません: {message}"),
+            ApiError::Network(message) => write!(f, "Cannot reach the server: {message}"),
             ApiError::Status { status, code, message, .. } => write!(f, "{message} ({status} {code})"),
         }
     }
@@ -56,10 +56,10 @@ pub struct Api {
 
 /// キーをBearerで送るので、平文の接続は手元の検証だけに許す。
 pub fn normalize_base(raw: &str) -> Result<String, String> {
-    let url = url::Url::parse(raw).map_err(|e| format!("API URL が正しくありません: {e}"))?;
+    let url = url::Url::parse(raw).map_err(|e| format!("Invalid API URL: {e}"))?;
     let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1"));
     if url.scheme() != "https" && !local {
-        return Err("API URL は https にしてください".to_string());
+        return Err("API URL must use https".to_string());
     }
     Ok(raw.trim_end_matches('/').to_string())
 }
@@ -73,7 +73,7 @@ pub fn segment(value: &str) -> Result<&str, String> {
     if valid {
         Ok(value)
     } else {
-        Err(format!("{value:?} は使えない文字を含みます"))
+        Err(format!("{value:?} contains invalid characters"))
     }
 }
 
@@ -121,7 +121,7 @@ impl Api {
         Err(ApiError::Status {
             status,
             code: field("code").unwrap_or_default(),
-            message: field("detail").or_else(|| field("title")).unwrap_or_else(|| "失敗しました".to_string()),
+            message: field("detail").or_else(|| field("title")).unwrap_or_else(|| "Request failed".to_string()),
             retry_after,
         })
     }

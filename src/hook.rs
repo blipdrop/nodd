@@ -36,11 +36,11 @@ fn output(decision: &str, reason: &str) -> Value {
 /// 記録された承認だけを許可する。
 pub fn decide(result: Result<Option<Outcome>, String>) -> Value {
     match result {
-        Ok(Some(Outcome::Approved)) => output("allow", "Nodで承認されました"),
-        Ok(Some(Outcome::Rejected)) => output("deny", "Nodで却下されました"),
-        Ok(Some(Outcome::Closed(state))) => output("deny", &format!("承認されませんでした: {state}")),
-        Ok(Some(Outcome::Chosen(_))) | Ok(None) => output("deny", "承認を確認できませんでした"),
-        Err(error) => output("deny", &format!("Nodを確認できませんでした: {error}")),
+        Ok(Some(Outcome::Approved)) => output("allow", "Approved in Nodd"),
+        Ok(Some(Outcome::Rejected)) => output("deny", "Rejected in Nodd"),
+        Ok(Some(Outcome::Closed(state))) => output("deny", &format!("Not approved: {state}")),
+        Ok(Some(Outcome::Chosen(_))) | Ok(None) => output("deny", "Could not confirm approval"),
+        Err(error) => output("deny", &format!("Could not check Nodd: {error}")),
     }
 }
 

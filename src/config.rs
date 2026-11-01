@@ -24,7 +24,7 @@ pub fn path() -> Result<PathBuf, String> {
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .ok_or("設定の置き場所が分かりません。HOME を設定してください")?;
+        .ok_or("Cannot find the config directory. Set HOME")?;
     Ok(base.join("nodd").join("config.json"))
 }
 
@@ -39,7 +39,7 @@ pub fn load(path: &Path) -> Result<Config, String> {
 /// 途中で止まっても壊れないよう、別名で書いてから置き換える。
 pub fn save(path: &Path, config: &Config) -> Result<(), String> {
     let describe = |e: std::io::Error| format!("{}: {e}", path.display());
-    let dir = path.parent().ok_or("設定の場所が正しくありません")?;
+    let dir = path.parent().ok_or("Invalid config path")?;
     fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(describe)?;
     let temporary = path.with_extension(format!("tmp{}", std::process::id()));
     let _ = fs::remove_file(&temporary);

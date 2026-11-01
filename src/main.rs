@@ -30,9 +30,9 @@ const DEFAULT_POLL_SECONDS: u64 = 5;
 const AFTER_DEADLINE: chrono::Duration = chrono::Duration::minutes(15);
 
 #[derive(Parser)]
-#[command(name = "nodd", version, about = "通知を送り、人の応答を待つ")]
+#[command(name = "nodd", version, about = "Send notifications and wait for a human response")]
 struct Cli {
-    /// 使う設定の名前。チャンネルごとにログインするときに分ける
+    /// Config profile name. Use one per channel when logging in to several
     #[arg(long, global = true, env = "NODD_PROFILE", default_value = "default")]
     profile: String,
     #[command(subcommand)]
@@ -41,34 +41,34 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// iPhoneでQRを読み、このPCに送信キーを受け取る
+    /// Scan a QR code on your iPhone to get a send key on this computer
     Login {
-        /// 接続先
+        /// API URL
         #[arg(long, env = "NODD_API_URL", default_value = DEFAULT_API)]
         api: String,
-        /// アプリのキー一覧に出す名前。既定はホスト名
+        /// Name shown in the app's key list. Defaults to the hostname
         #[arg(long)]
         name: Option<String>,
     },
-    /// このPCのキーを消す。サーバー側の失効はアプリから行う
+    /// Remove the key from this computer. Revoke it in the app
     Logout,
-    /// 使っている設定と接続先の状態を表示する
+    /// Show the current profile and API status
     Whoami,
-    /// 通知を送る
+    /// Send a notification
     Send(Send),
-    /// 承認や選択を求め、応答を待つ
+    /// Ask for approval or a choice and wait for the response
     Ask(Ask),
-    /// 送信済みの応答を待つ
+    /// Wait for the response to a sent message
     Wait {
         id: String,
         #[arg(long)]
         json: bool,
     },
-    /// 通知の状態を表示する
+    /// Show the status of a message
     Status { id: String },
-    /// 応答待ちを取り下げる
+    /// Cancel a pending question
     Cancel { id: String },
-    /// 応答を処理した結果を報告する
+    /// Report the result of acting on a response
     Done {
         id: String,
         #[arg(long, value_enum, default_value = "succeeded")]
@@ -76,17 +76,17 @@ enum Command {
         #[arg(long)]
         summary: Option<String>,
     },
-    /// アラートを解消する
+    /// Resolve an alert
     Resolve {
         alert_key: String,
         #[arg(long)]
         note: Option<String>,
     },
-    /// エージェントから使うMCPサーバーを標準入出力で動かす
+    /// Run an MCP server over stdio for agents
     Mcp,
-    /// Claude CodeのPreToolUseフック。承認されたツールだけを通す
+    /// Claude Code PreToolUse hook. Allows only approved tools
     Hook {
-        /// 応答期限の秒数
+        /// Response deadline in seconds
         #[arg(long, default_value_t = DEFAULT_HOOK_SECONDS)]
         expires_in: u32,
     },
@@ -95,21 +95,21 @@ enum Command {
 #[derive(Args)]
 struct Content {
     title: String,
-    /// 本文。`-` で標準入力から読む
+    /// Message body. Use `-` to read from stdin
     #[arg(long)]
     body: Option<String>,
     #[arg(long, value_enum)]
     level: Option<Level>,
-    /// `ラベル=値`。6個まで
+    /// `LABEL=VALUE`. Up to 6
     #[arg(long = "field", value_name = "LABEL=VALUE")]
     fields: Vec<String>,
-    /// `ラベル=https://…`。2個まで
+    /// `LABEL=https://…`. Up to 2
     #[arg(long = "link", value_name = "LABEL=URL")]
     links: Vec<String>,
-    /// ロック画面に本文を出さない
+    /// Hide the body on the lock screen
     #[arg(long)]
     sensitive: bool,
-    /// 結果をJSONで出す
+    /// Print the result as JSON
     #[arg(long)]
     json: bool,
 }
@@ -120,7 +120,7 @@ struct Send {
     content: Content,
     #[arg(long, value_enum, default_value = "notice")]
     kind: SendKind,
-    /// 同じキーの未解決アラートを1件にまとめ、解消にも使う
+    /// Group open alerts with the same key. Also used to resolve them
     #[arg(long)]
     alert_key: Option<String>,
 }
@@ -129,13 +129,13 @@ struct Send {
 struct Ask {
     #[command(flatten)]
     content: Content,
-    /// 選択肢 `id=ラベル`。指定すると承認ではなく選択を求める。2〜4個
+    /// Option as `id=LABEL`. Asks for a choice instead of approval. 2 to 4
     #[arg(long = "option", value_name = "ID=LABEL")]
     options: Vec<String>,
-    /// 応答期限の秒数
+    /// Response deadline in seconds
     #[arg(long, default_value_t = DEFAULT_ASK_SECONDS)]
     expires_in: u32,
-    /// 待たずに送信結果だけを出す
+    /// Print the send result without waiting
     #[arg(long)]
     no_wait: bool,
 }
@@ -206,7 +206,7 @@ fn pair(raw: &str, what: &str) -> Result<(String, String), String> {
     raw.split_once('=')
         .filter(|(left, right)| !left.is_empty() && !right.is_empty())
         .map(|(left, right)| (left.to_string(), right.to_string()))
-        .ok_or_else(|| format!("{what} は `左=右` の形で指定してください: {raw}"))
+        .ok_or_else(|| format!("{what} must be in the form `left=right`: {raw}"))
 }
 
 fn message_body(kind: &str, content: &Content, read_body: impl FnOnce() -> Result<String, String>) -> Result<Map<String, Value>, String> {
@@ -272,7 +272,7 @@ impl Session {
         let (api, key) = match (key, saved) {
             (Some(key), saved) => (api.or(saved.map(|s| s.api)).unwrap_or_else(|| DEFAULT_API.to_string()), key),
             (None, Some(saved)) => (api.unwrap_or(saved.api), saved.key),
-            (None, None) => return Err("キーがありません。`nodd login` を実行するか NODD_KEY を設定してください".to_string()),
+            (None, None) => return Err("No key found. Run `nodd login` or set NODD_KEY".to_string()),
         };
         Ok(Self { api: Api::new(api::normalize_base(&api)?)?, key })
     }
@@ -304,12 +304,12 @@ impl Session {
                         .and_then(|at| at.parse().ok())
                         .or(deadline);
                     if reply.body["action_state"].is_null() {
-                        return Err("この通知は応答を求めていません".to_string());
+                        return Err("This message does not ask for a response".to_string());
                     }
                     pause = reply.retry_after.unwrap_or(DEFAULT_POLL_SECONDS).max(1);
                 }
                 Err(error) if error.is_transient() => {
-                    eprintln!("{error}。再試行します");
+                    eprintln!("{error}. Retrying");
                 }
                 Err(error) => return Err(error.to_string()),
             }
@@ -318,7 +318,7 @@ impl Session {
                 None => started.elapsed() > Duration::from_secs(600),
             };
             if expired {
-                eprintln!("応答を確定できないまま待ち時間を過ぎました");
+                eprintln!("Timed out before the response was confirmed");
                 return Ok(Err(TIMED_OUT));
             }
             sleep(Duration::from_secs(pause));
@@ -340,7 +340,7 @@ fn hook_decision(profile: &str, expires_in: u32) -> Result<Option<Outcome>, Stri
     let input: Value = serde_json::from_str(&stdin_body()?).map_err(|e| e.to_string())?;
     let session = Session::open(profile)?;
     let accepted = session.post("/v1/messages", Some(&hook::message(&input, expires_in))).map_err(|e| e.to_string())?;
-    let id = accepted["id"].as_str().ok_or("応答の形式が正しくありません")?;
+    let id = accepted["id"].as_str().ok_or("Unexpected response format")?;
     Ok(session.wait(id)?.ok().map(|(outcome, _)| outcome))
 }
 
@@ -367,13 +367,13 @@ fn login(profile: &str, api: &str, name: Option<String>) -> Result<u8, String> {
         .call_retrying(Method::POST, "/v1/cli/pairings", None, Some(&body), None)
         .map_err(|e| e.to_string())?
         .body;
-    let text = |name: &str| started[name].as_str().map(str::to_string).ok_or("応答の形式が正しくありません");
+    let text = |name: &str| started[name].as_str().map(str::to_string).ok_or("Unexpected response format");
     let (code, poll_token) = (text("code")?, text("poll_token")?);
     let name = name.unwrap_or_else(host_name);
-    println!("Noddアプリの「CLIを追加」でこのQRを読み取ってください。\n");
+    println!("Scan this QR code with the Nodd app.\n");
     println!("{}", pairing::qr(&pairing::link(&code, &name))?);
-    println!("コード: {code}");
-    println!("名前: {name}\n");
+    println!("Code: {code}");
+    println!("Name: {name}\n");
     let limit = Instant::now() + Duration::from_secs(started["expires_in"].as_u64().unwrap_or(600));
     let path = format!("/v1/cli/pairings/{code}");
     while Instant::now() < limit {
@@ -382,13 +382,13 @@ fn login(profile: &str, api: &str, name: Option<String>) -> Result<u8, String> {
                 if let Some(sealed) = reply.body["sealed"].as_str() {
                     let value = key.open(sealed, &code)?;
                     if !value.starts_with("nodd_") {
-                        return Err("受け取ったキーの形式が正しくありません".to_string());
+                        return Err("The received key is malformed".to_string());
                     }
                     let file = config::path()?;
                     let mut saved = config::load(&file)?;
                     saved.profiles.insert(profile.to_string(), Profile { api: base, key: value });
                     config::save(&file, &saved)?;
-                    println!("ログインしました。{}", file.display());
+                    println!("Logged in. {}", file.display());
                     return Ok(0);
                 }
                 reply.retry_after.unwrap_or(2).max(1)
@@ -398,18 +398,18 @@ fn login(profile: &str, api: &str, name: Option<String>) -> Result<u8, String> {
         };
         sleep(Duration::from_secs(wait));
     }
-    Err("10分以内に許可されませんでした。もう一度実行してください".to_string())
+    Err("Not approved within 10 minutes. Run the command again".to_string())
 }
 
 fn logout(profile: &str) -> Result<u8, String> {
     let file = config::path()?;
     let mut saved = config::load(&file)?;
     if saved.profiles.remove(profile).is_none() {
-        println!("{profile} はログインしていません");
+        println!("{profile} is not logged in");
         return Ok(0);
     }
     config::save(&file, &saved)?;
-    println!("このPCのキーを消しました。キーの失効はアプリのチャンネル設定から行ってください");
+    println!("Removed the key from this computer. Revoke it in the app's channel settings");
     Ok(0)
 }
 
@@ -454,7 +454,7 @@ fn ask(profile: &str, command: Ask) -> Result<u8, String> {
         body.insert("options".into(), options.collect::<Result<Vec<_>, _>>()?.into());
     }
     let accepted = session.post("/v1/messages", Some(&Value::Object(body))).map_err(|e| e.to_string())?;
-    let id = accepted["id"].as_str().ok_or("応答の形式が正しくありません")?.to_string();
+    let id = accepted["id"].as_str().ok_or("Unexpected response format")?.to_string();
     if command.no_wait {
         if command.content.json {
             println!("{accepted}");
@@ -463,7 +463,7 @@ fn ask(profile: &str, command: Ask) -> Result<u8, String> {
         }
         return Ok(0);
     }
-    eprintln!("応答を待っています: {id}");
+    eprintln!("Waiting for a response: {id}");
     finish_wait(&session, &id, command.content.json)
 }
 

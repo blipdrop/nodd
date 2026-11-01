@@ -20,7 +20,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "notify",
-            "description": "人のiPhoneへ通知を送る。応答は待たない。",
+            "description": "Send a notification to a person's iPhone. Does not wait for a response.",
             "inputSchema": {
                 "type": "object",
                 "required": ["title"],
@@ -33,7 +33,7 @@ fn tools() -> Value {
         },
         {
             "name": "ask",
-            "description": "人に承認や選択を求める。時間内に答えがなければ pending を返すので check_answer で確かめる。",
+            "description": "Ask a person to approve or choose. Returns pending if there is no answer in time; use check_answer to look it up.",
             "inputSchema": {
                 "type": "object",
                 "required": ["title"],
@@ -42,7 +42,7 @@ fn tools() -> Value {
                     "body": {"type": "string", "maxLength": 1000},
                     "options": {
                         "type": "array",
-                        "description": "指定すると選択、省略すると承認か却下を求める。2〜4個。",
+                        "description": "2 to 4 options to choose from. Omit to ask for approve or reject.",
                         "items": {
                             "type": "object",
                             "required": ["id", "label"],
@@ -56,7 +56,7 @@ fn tools() -> Value {
         },
         {
             "name": "check_answer",
-            "description": "ask で返された id の答えを確かめる。",
+            "description": "Look up the answer for an id returned by ask.",
             "inputSchema": {
                 "type": "object",
                 "required": ["id"],
@@ -89,7 +89,7 @@ fn ask(backend: &dyn Backend, arguments: &Value, pause: Duration) -> Result<Valu
     let mut body = json!({"kind": kind, "expires_in": crate::DEFAULT_ASK_SECONDS});
     copy_fields(arguments, &["title", "body", "options", "expires_in"], &mut body);
     let accepted = backend.send(&body)?;
-    let id = accepted["id"].as_str().ok_or("応答の形式が正しくありません")?.to_string();
+    let id = accepted["id"].as_str().ok_or("Unexpected response format")?.to_string();
     let wait = arguments["wait_seconds"].as_u64().unwrap_or(DEFAULT_WAIT_SECONDS).min(MAX_WAIT_SECONDS);
     let limit = Instant::now() + Duration::from_secs(wait);
     loop {
@@ -114,7 +114,7 @@ fn call(backend: &dyn Backend, name: &str, arguments: &Value, pause: Duration) -
             let id = crate::api::segment(arguments["id"].as_str().unwrap_or_default())?;
             Ok(answer(id, &backend.state(id)?))
         }
-        other => Err(format!("{other} は使えません")),
+        other => Err(format!("{other} is not available")),
     }
 }
 

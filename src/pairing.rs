@@ -25,7 +25,7 @@ impl PairingKey {
     pub fn open(&self, sealed: &str, code: &str) -> Result<String, String> {
         let bytes = STANDARD.decode(sealed).map_err(|e| e.to_string())?;
         if bytes.len() <= 32 {
-            return Err("受け取ったキーの形式が正しくありません".to_string());
+            return Err("The received key is malformed".to_string());
         }
         let (enc, ciphertext) = bytes.split_at(32);
         let enc = <X25519HkdfSha256 as Kem>::EncappedKey::from_bytes(enc).map_err(|e| e.to_string())?;
