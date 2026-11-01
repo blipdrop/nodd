@@ -67,13 +67,17 @@ fn tools() -> Value {
 }
 
 fn answer(id: &str, state: &Value) -> Value {
-    match outcome(state) {
+    let mut result = match outcome(state) {
         None => json!({"id": id, "status": "pending"}),
         Some(Outcome::Approved) => json!({"id": id, "status": "approved"}),
         Some(Outcome::Rejected) => json!({"id": id, "status": "rejected"}),
         Some(Outcome::Chosen(option)) => json!({"id": id, "status": "answered", "option_id": option}),
         Some(Outcome::Closed(state)) => json!({"id": id, "status": state}),
+    };
+    if let Some(note) = state["response"]["note"].as_str() {
+        result["note"] = note.into();
     }
+    result
 }
 
 fn copy_fields(arguments: &Value, names: &[&str], body: &mut Value) {
@@ -197,6 +201,12 @@ mod tests {
         let message = json!({"id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}});
         let reply = handle(backend, &message, Duration::ZERO).unwrap();
         serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap_or(Value::Null)
+    }
+
+    #[test]
+    fn rejection_note_is_returned() {
+        let state = json!({"kind": "approval", "response": {"option_id": "reject", "note": "Use staging"}});
+        assert_eq!(answer("msg_1", &state), json!({"id": "msg_1", "status": "rejected", "note": "Use staging"}));
     }
 
     #[test]

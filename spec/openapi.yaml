@@ -201,6 +201,63 @@ paths:
           description: 受付済み
         "401": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/RateLimited" }
+  /v1/heartbeats/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/AlertKey"
+    post:
+      tags: [Heartbeats]
+      operationId: reportHeartbeat
+      summary: 定期ジョブの生存を報告する
+      description: |
+        `interval` と `grace` の秒数のうちに次の報告がなければ、チャンネルへ通知します。
+        途絶えた後に報告が届くと再開を知らせます。報告は送信数に数えません。チャンネルごとに20件までです。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [interval]
+              properties:
+                interval:
+                  type: integer
+                  minimum: 60
+                  maximum: 2678400
+                grace:
+                  type: integer
+                  minimum: 0
+                  maximum: 2678400
+                  description: 省略すると `interval` の10%です。60秒を下回りません。
+      responses:
+        "200":
+          description: 記録済み
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, due_at]
+                properties:
+                  name:
+                    type: string
+                  due_at:
+                    type: string
+                    format: date-time
+        "401": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      tags: [Heartbeats]
+      operationId: deleteHeartbeat
+      summary: 見張りを止める
+      responses:
+        "204":
+          description: 削除済み
+        "401": { $ref: "#/components/responses/Problem" }
   /v1/actions/events:
     get:
       tags: [Actions]
@@ -530,6 +587,18 @@ components:
           enum: [reject, ignore]
           default: reject
           description: 期限切れの扱い。サービスは未応答を承認として扱ってはいけません。
+        approvals_required:
+          type: integer
+          minimum: 1
+          maximum: 3
+          description: "`approval` が確定するまでに必要な人数。2人以上はTeamだけです。同じ人は1人として数え、1人でも却下すると確定します。"
+        escalate_after:
+          type: integer
+          minimum: 60
+          maximum: 2592000
+          description: この秒数のあいだ応答がなければ、通知を切っている担当にも知らせ、`action.escalated` を記録します。応答期限より短くします。Teamだけです。
+        escalate_to:
+          $ref: "#/components/schemas/Audience"
         alert_key:
           $ref: "#/components/schemas/AlertKey"
         dedupe_key:
@@ -607,6 +676,10 @@ components:
           type: string
           format: date-time
           description: 端末が署名した時刻です。
+        note:
+          type: string
+          maxLength: 200
+          description: 応答した人が書いた却下の理由などです。署名の対象に含みます。
         signature:
           type: object
           description: サーバーを信用せずに検証できる端末の署名です。
@@ -656,6 +729,14 @@ components:
           $ref: "#/components/schemas/ActionState"
         response:
           $ref: "#/components/schemas/Response"
+        approvals_required:
+          type: integer
+          description: 確定に要る承認の人数です。
+        approvals:
+          type: array
+          description: 確定より前に集まった承認です。
+          items:
+            $ref: "#/components/schemas/Response"
         delivery:
           $ref: "#/components/schemas/Delivery"
         resolved_at:
@@ -680,7 +761,7 @@ components:
           type: string
         type:
           type: string
-          enum: [action.responded, action.expired, action.cancelled, delivery.expired]
+          enum: [action.responded, action.escalated, action.expired, action.cancelled, delivery.expired]
         occurred_at:
           type: string
           format: date-time

@@ -33,11 +33,14 @@ fn output(decision: &str, reason: &str) -> Value {
     }})
 }
 
-/// 記録された承認だけを許可する。
-pub fn decide(result: Result<Option<Outcome>, String>) -> Value {
+/// 記録された承認だけを許可する。却下の理由はエージェントへそのまま渡す。
+pub fn decide(result: Result<Option<Outcome>, String>, note: Option<&str>) -> Value {
     match result {
         Ok(Some(Outcome::Approved)) => output("allow", "Approved in Nodd"),
-        Ok(Some(Outcome::Rejected)) => output("deny", "Rejected in Nodd"),
+        Ok(Some(Outcome::Rejected)) => match note {
+            Some(note) => output("deny", &format!("Rejected in Nodd: {note}")),
+            None => output("deny", "Rejected in Nodd"),
+        },
         Ok(Some(Outcome::Closed(state))) => output("deny", &format!("Not approved: {state}")),
         Ok(Some(Outcome::Chosen(_))) | Ok(None) => output("deny", "Could not confirm approval"),
         Err(error) => output("deny", &format!("Could not check Nodd: {error}")),
@@ -54,7 +57,7 @@ mod tests {
 
     #[test]
     fn only_approval_allows() {
-        assert_eq!(decision(&decide(Ok(Some(Outcome::Approved)))), "allow");
+        assert_eq!(decision(&decide(Ok(Some(Outcome::Approved)), None)), "allow");
         for denied in [
             Ok(Some(Outcome::Rejected)),
             Ok(Some(Outcome::Closed("expired".into()))),
@@ -62,8 +65,14 @@ mod tests {
             Ok(None),
             Err("offline".to_string()),
         ] {
-            assert_eq!(decision(&decide(denied)), "deny");
+            assert_eq!(decision(&decide(denied, None)), "deny");
         }
+    }
+
+    #[test]
+    fn rejection_reason_reaches_the_agent() {
+        let value = decide(Ok(Some(Outcome::Rejected)), Some("Use staging"));
+        assert_eq!(value["hookSpecificOutput"]["permissionDecisionReason"], "Rejected in Nodd: Use staging");
     }
 
     #[test]

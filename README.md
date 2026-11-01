@@ -43,7 +43,7 @@ claude mcp add nodd -- nodd mcp
 `nodd mcp` provides `notify`, `ask`, and `check_answer`. A model can ignore MCP answers, so use the hook to enforce approval:
 
 ```json
-{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "nodd hook", "timeout": 900}]}]}}
+{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "nodd hook", "timeout": 1260}]}]}}
 ```
 
 ## GitHub Actions

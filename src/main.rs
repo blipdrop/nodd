@@ -82,6 +82,17 @@ enum Command {
         #[arg(long)]
         note: Option<String>,
     },
+    /// Report that a scheduled job is alive. Notifies if the next report is late
+    Heartbeat {
+        /// Name of the job, such as `nightly.backup`
+        name: String,
+        /// Seconds until the next report is expected. 60 to 2678400
+        #[arg(long)]
+        every: u32,
+        /// Extra seconds to wait before notifying. Defaults to 10% of `--every`
+        #[arg(long)]
+        grace: Option<u32>,
+    },
     /// Run an MCP server over stdio for agents
     Mcp,
     /// Claude Code PreToolUse hook. Allows only approved tools
@@ -135,6 +146,12 @@ struct Ask {
     /// Response deadline in seconds
     #[arg(long, default_value_t = DEFAULT_ASK_SECONDS)]
     expires_in: u32,
+    /// People who must approve, 1 to 3. More than 1 needs a Team plan
+    #[arg(long)]
+    approvals: Option<u32>,
+    /// Notify other responders after this many seconds without a response. Needs a Team plan
+    #[arg(long)]
+    escalate_after: Option<u32>,
     /// Print the send result without waiting
     #[arg(long)]
     no_wait: bool,
@@ -336,12 +353,17 @@ impl mcp::Backend for Session {
     }
 }
 
-fn hook_decision(profile: &str, expires_in: u32) -> Result<Option<Outcome>, String> {
+fn hook_decision(profile: &str, expires_in: u32) -> Result<Option<(Outcome, Value)>, String> {
     let input: Value = serde_json::from_str(&stdin_body()?).map_err(|e| e.to_string())?;
     let session = Session::open(profile)?;
     let accepted = session.post("/v1/messages", Some(&hook::message(&input, expires_in))).map_err(|e| e.to_string())?;
     let id = accepted["id"].as_str().ok_or("Unexpected response format")?;
-    Ok(session.wait(id)?.ok().map(|(outcome, _)| outcome))
+    Ok(session.wait(id)?.ok())
+}
+
+/// 応答に添えられた理由。
+fn note(state: &Value) -> Option<&str> {
+    state["response"]["note"].as_str()
 }
 
 fn report(outcome: &Outcome, state: &Value, as_json: bool) -> u8 {
@@ -353,6 +375,10 @@ fn report(outcome: &Outcome, state: &Value, as_json: bool) -> u8 {
             Outcome::Rejected => println!("rejected"),
             Outcome::Chosen(option) => println!("{option}"),
             Outcome::Closed(state) => println!("{state}"),
+        }
+        // 標準出力は判定に使われるので、理由は分けて出す
+        if let Some(note) = note(state) {
+            eprintln!("Note: {note}");
         }
     }
     exit_code(outcome)
@@ -447,6 +473,12 @@ fn ask(profile: &str, command: Ask) -> Result<u8, String> {
     let kind = if command.options.is_empty() { "approval" } else { "choice" };
     let mut body = message_body(kind, &command.content, stdin_body)?;
     body.insert("expires_in".into(), command.expires_in.into());
+    if let Some(count) = command.approvals {
+        body.insert("approvals_required".into(), count.into());
+    }
+    if let Some(seconds) = command.escalate_after {
+        body.insert("escalate_after".into(), seconds.into());
+    }
     if !command.options.is_empty() {
         let options = command.options.iter().map(|raw| {
             pair(raw, "--option").map(|(id, label)| json!({"id": id, "label": label}))
@@ -483,7 +515,9 @@ fn run(cli: Cli) -> Result<u8, String> {
             Ok(0)
         }
         Command::Hook { expires_in } => {
-            println!("{}", hook::decide(hook_decision(profile, expires_in)));
+            let result = hook_decision(profile, expires_in);
+            let reason = result.as_ref().ok().and_then(Option::as_ref).and_then(|(_, state)| note(state)).map(str::to_string);
+            println!("{}", hook::decide(result.map(|r| r.map(|(outcome, _)| outcome)), reason.as_deref()));
             Ok(0)
         }
         Command::Login { api, name } => login(profile, &api, name),
@@ -513,6 +547,16 @@ fn run(cli: Cli) -> Result<u8, String> {
             }
             let path = format!("/v1/messages/{}/result", segment(&id)?);
             Session::open(profile)?.post(&path, Some(&body)).map_err(|e| e.to_string())?;
+            Ok(0)
+        }
+        Command::Heartbeat { name, every, grace } => {
+            let mut body = json!({"interval": every});
+            if let Some(grace) = grace {
+                body["grace"] = grace.into();
+            }
+            let path = format!("/v1/heartbeats/{}", segment(&name)?);
+            let reply = Session::open(profile)?.post(&path, Some(&body)).map_err(|e| e.to_string())?;
+            println!("{}", reply["due_at"].as_str().unwrap_or_default());
             Ok(0)
         }
         Command::Resolve { alert_key, note } => {
