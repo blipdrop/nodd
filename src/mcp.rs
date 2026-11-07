@@ -16,6 +16,15 @@ pub trait Backend {
     fn state(&self, id: &str) -> Result<Value, String>;
 }
 
+fn image_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "A JPEG or PNG up to 40 KB, as Base64.",
+        "required": ["data"],
+        "properties": {"data": {"type": "string"}, "alt": {"type": "string", "maxLength": 120}},
+    })
+}
+
 fn tools() -> Value {
     json!([
         {
@@ -26,7 +35,9 @@ fn tools() -> Value {
                 "required": ["title"],
                 "properties": {
                     "title": {"type": "string", "maxLength": 120},
-                    "body": {"type": "string", "maxLength": 1000},
+                    "body": {"type": "string", "maxLength": 4000, "description": "Up to 1,000 characters, or 4,000 with format markdown."},
+                    "format": {"type": "string", "enum": ["plain", "markdown"]},
+                    "image": image_schema(),
                     "level": {"type": "string", "enum": ["low", "normal", "high"]},
                 },
             },
@@ -39,7 +50,9 @@ fn tools() -> Value {
                 "required": ["title"],
                 "properties": {
                     "title": {"type": "string", "maxLength": 120},
-                    "body": {"type": "string", "maxLength": 1000},
+                    "body": {"type": "string", "maxLength": 4000, "description": "Up to 1,000 characters, or 4,000 with format markdown."},
+                    "format": {"type": "string", "enum": ["plain", "markdown"]},
+                    "image": image_schema(),
                     "options": {
                         "type": "array",
                         "description": "2 to 4 options to choose from. Omit to ask for approve or reject.",
@@ -47,6 +60,15 @@ fn tools() -> Value {
                             "type": "object",
                             "required": ["id", "label"],
                             "properties": {"id": {"type": "string"}, "label": {"type": "string"}},
+                        },
+                    },
+                    "input": {
+                        "type": "object",
+                        "description": "Let the person add up to 200 characters of text, returned as note. Use it only when a short instruction helps.",
+                        "required": ["prompt"],
+                        "properties": {
+                            "prompt": {"type": "string", "maxLength": 40},
+                            "required": {"type": "boolean"},
                         },
                     },
                     "expires_in": {"type": "integer", "minimum": 60},
@@ -91,7 +113,7 @@ fn copy_fields(arguments: &Value, names: &[&str], body: &mut Value) {
 fn ask(backend: &dyn Backend, arguments: &Value, pause: Duration) -> Result<Value, String> {
     let kind = if arguments["options"].is_array() { "choice" } else { "approval" };
     let mut body = json!({"kind": kind, "expires_in": crate::DEFAULT_ASK_SECONDS});
-    copy_fields(arguments, &["title", "body", "options", "expires_in"], &mut body);
+    copy_fields(arguments, &["title", "body", "format", "image", "options", "input", "expires_in"], &mut body);
     let accepted = backend.send(&body)?;
     let id = accepted["id"].as_str().ok_or("Unexpected response format")?.to_string();
     let wait = arguments["wait_seconds"].as_u64().unwrap_or(DEFAULT_WAIT_SECONDS).min(MAX_WAIT_SECONDS);
@@ -109,7 +131,7 @@ fn call(backend: &dyn Backend, name: &str, arguments: &Value, pause: Duration) -
     match name {
         "notify" => {
             let mut body = json!({"kind": "notice"});
-            copy_fields(arguments, &["title", "body", "level"], &mut body);
+            copy_fields(arguments, &["title", "body", "format", "image", "level"], &mut body);
             let accepted = backend.send(&body)?;
             Ok(json!({"id": accepted["id"], "status": "sent"}))
         }
@@ -239,6 +261,22 @@ mod tests {
     fn unanswered_ask_stays_pending() {
         let backend = fake(vec![json!({"kind": "approval", "action_state": "open"})]);
         assert_eq!(tool(&backend, "ask", json!({"title": "t", "wait_seconds": 0}))["status"], "pending");
+    }
+
+    #[test]
+    fn input_is_passed_to_the_message() {
+        let backend = fake(vec![json!({"kind": "approval", "action_state": "open"})]);
+        tool(&backend, "ask", json!({"title": "t", "wait_seconds": 0, "input": {"prompt": "How?", "required": true}}));
+        assert_eq!(backend.sent.borrow()[0]["input"]["prompt"], "How?");
+    }
+
+    #[test]
+    fn notify_keeps_format_and_image() {
+        let backend = fake(vec![]);
+        let image = json!({"data": "aGk=", "alt": "graph"});
+        tool(&backend, "notify", json!({"title": "t", "format": "markdown", "image": image}));
+        assert_eq!(backend.sent.borrow()[0]["format"], "markdown");
+        assert_eq!(backend.sent.borrow()[0]["image"]["alt"], "graph");
     }
 
     #[test]

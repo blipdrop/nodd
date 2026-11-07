@@ -8,17 +8,20 @@ mod mcp;
 mod pairing;
 
 use api::{segment, Api, ApiError, DEFAULT_API};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use config::Profile;
 use pairing::PairingKey;
 use reqwest::Method;
 use serde_json::{json, Map, Value};
-use std::io::Read;
+use std::io::{IsTerminal, Read};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+const MAX_IMAGE_BYTES: usize = 40 * 1024;
 const REJECTED: u8 = 10;
 const CLOSED: u8 = 11;
 const TIMED_OUT: u8 = 12;
@@ -120,6 +123,15 @@ struct Content {
     /// Hide the body on the lock screen
     #[arg(long)]
     sensitive: bool,
+    /// Format the body as Markdown. Allows up to 4,000 characters
+    #[arg(long)]
+    markdown: bool,
+    /// Attach a JPEG or PNG file, up to 40 KB
+    #[arg(long, value_name = "FILE")]
+    image: Option<PathBuf>,
+    /// Text describing the image, up to 120 characters
+    #[arg(long, requires = "image")]
+    image_alt: Option<String>,
     /// Print the result as JSON
     #[arg(long)]
     json: bool,
@@ -152,9 +164,24 @@ struct Ask {
     /// Notify other responders after this many seconds without a response. Needs a Team plan
     #[arg(long)]
     escalate_after: Option<u32>,
+    /// Let the responder add text, up to 200 characters. The value is the prompt, up to 40 characters
+    #[arg(long, value_name = "PROMPT")]
+    input: Option<String>,
+    /// Require the text from --input
+    #[arg(long, requires = "input")]
+    input_required: bool,
     /// Print the send result without waiting
     #[arg(long)]
     no_wait: bool,
+    /// Ask for a secret such as a password. Prints only the value, which stays encrypted on the server
+    #[arg(long, conflicts_with_all = ["options", "input", "approvals", "no_wait", "json"])]
+    secret: bool,
+    /// Run COMMAND with the secret in this environment variable instead of printing it
+    #[arg(long = "env", value_name = "NAME", requires = "secret", requires = "command")]
+    env_name: Option<String>,
+    /// Command to run with --env, after `--`
+    #[arg(last = true, value_name = "COMMAND", requires = "env_name")]
+    command: Vec<String>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -239,6 +266,20 @@ fn message_body(kind: &str, content: &Content, read_body: impl FnOnce() -> Resul
         }
         None => {}
     }
+    if content.markdown {
+        body.insert("format".into(), "markdown".into());
+    }
+    if let Some(path) = &content.image {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return Err(format!("{}: images can be up to 40 KB", path.display()));
+        }
+        let mut image = json!({"data": STANDARD.encode(bytes)});
+        if let Some(alt) = &content.image_alt {
+            image["alt"] = alt.as_str().into();
+        }
+        body.insert("image".into(), image);
+    }
     if let Some(level) = content.level {
         body.insert("level".into(), level.name().into());
     }
@@ -299,6 +340,18 @@ impl Session {
         let idempotency = ulid::Ulid::new().to_string();
         let reply = self.api.call_retrying(Method::POST, path, Some(&self.key), body, Some(&idempotency))?;
         Ok(reply.body)
+    }
+
+    /// 値を開けたら暗号文は要らない。消せなくても巡回が消すので、結果は止めない。
+    fn take_secret(&self, id: &str, key: &PairingKey) -> Result<String, String> {
+        let path = format!("/v1/messages/{id}/secret");
+        let reply = self.api.call_retrying(Method::GET, &path, Some(&self.key), None, None).map_err(|e| e.to_string())?;
+        let sealed = reply.body["sealed"].as_str().ok_or("Unexpected response format")?;
+        let value = key.open_secret(sealed, id).map_err(|_| "The received secret could not be opened".to_string())?;
+        if let Err(error) = self.api.call_retrying(Method::DELETE, &path, Some(&self.key), None, None) {
+            eprintln!("The encrypted value stays on the server for up to 10 minutes: {error}");
+        }
+        Ok(value)
     }
 
     fn state(&self, id: &str) -> Result<api::Reply, ApiError> {
@@ -469,15 +522,25 @@ fn send(profile: &str, command: Send) -> Result<u8, String> {
 }
 
 fn ask(profile: &str, command: Ask) -> Result<u8, String> {
+    if command.secret && command.env_name.is_none() && std::io::stdout().is_terminal() {
+        return Err("--secret would show the value on screen. Pipe it, or use --env NAME -- COMMAND".to_string());
+    }
     let session = Session::open(profile)?;
+    let key = command.secret.then(PairingKey::generate);
     let kind = if command.options.is_empty() { "approval" } else { "choice" };
     let mut body = message_body(kind, &command.content, stdin_body)?;
     body.insert("expires_in".into(), command.expires_in.into());
+    if let Some(key) = &key {
+        body.insert("secret".into(), json!({"public_key": key.public_base64()}));
+    }
     if let Some(count) = command.approvals {
         body.insert("approvals_required".into(), count.into());
     }
     if let Some(seconds) = command.escalate_after {
         body.insert("escalate_after".into(), seconds.into());
+    }
+    if let Some(prompt) = &command.input {
+        body.insert("input".into(), json!({"prompt": prompt, "required": command.input_required}));
     }
     if !command.options.is_empty() {
         let options = command.options.iter().map(|raw| {
@@ -496,7 +559,29 @@ fn ask(profile: &str, command: Ask) -> Result<u8, String> {
         return Ok(0);
     }
     eprintln!("Waiting for a response: {id}");
-    finish_wait(&session, &id, command.content.json)
+    match key {
+        Some(key) => finish_secret(&session, &id, &key, command.env_name.as_deref(), &command.command),
+        None => finish_wait(&session, &id, command.content.json),
+    }
+}
+
+/// 標準出力は値の受け渡しに使われるので、値のほかは何も出さない。
+fn finish_secret(session: &Session, id: &str, key: &PairingKey, env_name: Option<&str>, command: &[String]) -> Result<u8, String> {
+    let outcome = match session.wait(id)? {
+        Ok((outcome, _)) => outcome,
+        Err(code) => return Ok(code),
+    };
+    if outcome != Outcome::Approved {
+        eprintln!("No secret was returned: {outcome:?}");
+        return Ok(exit_code(&outcome));
+    }
+    let value = session.take_secret(id, key)?;
+    let (Some(name), Some((program, args))) = (env_name, command.split_first()) else {
+        println!("{value}");
+        return Ok(0);
+    };
+    let status = std::process::Command::new(program).args(args).env(name, value).status().map_err(|e| format!("{program}: {e}"))?;
+    Ok(status.code().map_or(1, |code| code as u8))
 }
 
 fn finish_wait(session: &Session, id: &str, as_json: bool) -> Result<u8, String> {
@@ -582,6 +667,16 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    #[test]
+    fn oversized_image_is_refused_before_sending() {
+        let path = std::env::temp_dir().join(format!("nodd-large-{}.png", std::process::id()));
+        std::fs::write(&path, vec![0; MAX_IMAGE_BYTES + 1]).unwrap();
+        let content = Content { image: Some(path.clone()), ..content() };
+        let error = message_body("notice", &content, || unreachable!()).unwrap_err();
+        std::fs::remove_file(path).unwrap();
+        assert!(error.contains("40 KB"), "{error}");
+    }
+
     fn content() -> Content {
         Content {
             title: "t".into(),
@@ -590,6 +685,9 @@ mod tests {
             fields: vec![],
             links: vec![],
             sensitive: false,
+            markdown: false,
+            image: None,
+            image_alt: None,
             json: false,
         }
     }
@@ -636,6 +734,19 @@ mod tests {
         input.fields = vec!["no-separator".into()];
         assert!(message_body("notice", &input, || unreachable!()).is_err());
         assert!(pair("=x", "--option").is_err());
+    }
+
+    #[test]
+    fn secret_flags_depend_on_each_other() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["nodd", "ask", "t"], args].concat()).map(|_| ());
+        assert!(parse(&["--secret"]).is_ok());
+        assert!(parse(&["--secret", "--env", "TOKEN", "--", "deploy", "--now"]).is_ok());
+        assert!(parse(&["--secret", "--env", "TOKEN"]).is_err(), "コマンドなしでは値の行き先がない");
+        assert!(parse(&["--env", "TOKEN", "--", "deploy"]).is_err());
+        assert!(parse(&["--secret", "--", "deploy"]).is_err());
+        assert!(parse(&["--secret", "--no-wait"]).is_err(), "鍵はこの実行の中にしかない");
+        assert!(parse(&["--secret", "--json"]).is_err());
+        assert!(parse(&["--secret", "--input", "p"]).is_err());
     }
 
     #[test]

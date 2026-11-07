@@ -1,12 +1,12 @@
 openapi: 3.1.0
 info:
   title: Nodd Public API
-  version: 0.1.0
+  version: 0.3.0
   description: |
-    サービス、CLI、エージェントから通知を送り、人の応答を受け取るAPIです。
+    An API for sending notifications from services, CLIs, and agents, and receiving responses from people.
 
-    すべての入力は送信キーのチャンネルに届きます。宛先のチャンネルは本文で指定しません。
-    エラーは RFC 9457 の `application/problem+json` で返し、機械向けの値は `code` に入ります。
+    All input goes to the channel of the send key. You do not specify a destination channel in the request body.
+    Errors are returned as RFC 9457 `application/problem+json`. The machine-readable value is in `code`.
   license:
     name: Apache-2.0
     identifier: Apache-2.0
@@ -15,15 +15,15 @@ servers:
     description: Production
 tags:
   - name: Messages
-    description: 通知の送信と状態の確認
+    description: Send notifications and check their state
   - name: Alerts
-    description: アラートの解消
+    description: Resolve alerts
   - name: Actions
-    description: 応答イベントの取得
+    description: Fetch response events
   - name: Inbound
-    description: 外部サービスからの受信
+    description: Receive from external services
   - name: Meta
-    description: サービスの状態
+    description: Service status
 security:
   - sendKey: []
 paths:
@@ -31,12 +31,12 @@ paths:
     post:
       tags: [Messages]
       operationId: createMessage
-      summary: 通知を送る
+      summary: Send a notification
       description: |
-        受け付けた時点で `202` を返します。端末への到達は保証しません。
-        応答が必要な種類は、`GET /v1/messages/{id}`、callback、`GET /v1/actions/events` のいずれかで結果を受け取ります。
-        チャンネルが一時停止中は `403 channel_paused` を返します。`Retry-After` の秒数が過ぎると自動で戻ります。
-        プランの上限を超えたチャンネルは `403 channel_read_only` です。新しいチャンネルから止まります。
+        Returns `202` once the message is accepted. Delivery to devices is not guaranteed.
+        For kinds that need a response, get the result from `GET /v1/messages/{id}`, a callback, or `GET /v1/actions/events`.
+        While a channel is paused, this returns `403 channel_paused`. The channel resumes automatically after the `Retry-After` seconds have passed.
+        A channel over the plan limit returns `403 channel_read_only`. Newer channels are stopped first.
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
@@ -47,31 +47,31 @@ paths:
               $ref: "#/components/schemas/MessageCreate"
             examples:
               notice:
-                summary: お知らせ
+                summary: Notice
                 value:
                   kind: notice
                   level: low
-                  title: バックアップが完了しました
+                  title: Backup completed
               approval:
-                summary: 承認
+                summary: Approval
                 value:
                   kind: approval
                   level: high
-                  title: 本番デプロイの承認
-                  body: api v2.4.1 を本番へ反映します
+                  title: Approve production deploy
+                  body: Deploys api v2.4.1 to production
                   fields:
-                    - label: 環境
+                    - label: Environment
                       value: production
-                    - label: 変更
+                    - label: Change
                       value: v2.4.0 → v2.4.1
                   links:
-                    - label: 変更内容を見る
+                    - label: View changes
                       url: https://github.com/acme/api/pull/482
                   expires_in: 3600
                   on_timeout: reject
       responses:
         "202":
-          description: 受付済み
+          description: Accepted
           headers:
             RateLimit-Remaining:
               $ref: "#/components/headers/RateLimitRemaining"
@@ -83,7 +83,7 @@ paths:
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "409":
-          description: "`open_actions_exceeded`。ボタンなしで届けず送信を拒否します。"
+          description: "`open_actions_exceeded`. The message is rejected rather than delivered without buttons."
           content:
             application/problem+json:
               schema:
@@ -98,19 +98,19 @@ paths:
     get:
       tags: [Messages]
       operationId: getMessage
-      summary: 状態と応答を取得する
+      summary: Get state and response
       description: |
-        待ち受けはサーバー側で保持しません。`Retry-After` の秒数を空けて再度取得します。
-        本文はサーバーに残らないので返しません。
+        The server does not hold the request open. Wait the `Retry-After` seconds, then fetch again.
+        The message content is not returned, because it is not kept on the server.
       security:
         - replyToken: []
         - sendKey: []
       responses:
         "200":
-          description: 現在の状態
+          description: Current state
           headers:
             Retry-After:
-              description: 次に取得するまでの秒数。応答が確定すると付きません。
+              description: Seconds until the next fetch. Omitted once the response is final.
               schema:
                 type: integer
           content:
@@ -123,10 +123,10 @@ paths:
     patch:
       tags: [Messages]
       operationId: updateMessage
-      summary: 進捗カードを更新する
+      summary: Update a progress card
       description: |
-        `kind: progress` の通知だけ更新できます。本文と同じく暗号化して端末へ届け、サーバーには残しません。
-        `running` の更新は通知を鳴らさず、`succeeded` と `failed` は通知します。その後の更新は `409 invalid_state` です。
+        Only `kind: progress` messages can be updated. Updates are encrypted and delivered to devices like message content, and are not kept on the server.
+        `running` updates are silent; `succeeded` and `failed` send a notification. Any update after that returns `409 invalid_state`.
       requestBody:
         required: true
         content:
@@ -135,22 +135,54 @@ paths:
               $ref: "#/components/schemas/MessageUpdate"
       responses:
         "202":
-          description: 受付済み
+          description: Accepted
         "401": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/RateLimited" }
+  /v1/messages/{id}/secret:
+    parameters:
+      - $ref: "#/components/parameters/MessageId"
+    get:
+      tags: [Messages]
+      operationId: getSecret
+      summary: Read the sealed answer to a secret request
+      description: Returns the sealed value once it has been approved. The server keeps it until you delete it, or for up to 10 minutes.
+      responses:
+        "200":
+          description: Sealed value
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sealed]
+                properties:
+                  sealed:
+                    type: string
+                    description: base64(enc || ciphertext)
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+    delete:
+      tags: [Messages]
+      operationId: deleteSecret
+      summary: Delete the sealed answer
+      description: Call this after opening the value.
+      responses:
+        "204":
+          description: Deleted
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
   /v1/messages/{id}/cancel:
     parameters:
       - $ref: "#/components/parameters/MessageId"
     post:
       tags: [Messages]
       operationId: cancelMessage
-      summary: 応答待ちを取り下げる
-      description: 応答前の承認や選択を取り下げます。押された後は `409 already_claimed` を返します。
+      summary: Cancel a pending response
+      description: Cancels an approval or choice before anyone responds. Once a button has been pressed, this returns `409 already_claimed`.
       responses:
         "204":
-          description: 取り下げ済み
+          description: Cancelled
         "401": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
@@ -160,8 +192,8 @@ paths:
     post:
       tags: [Messages]
       operationId: reportResult
-      summary: 応答を処理した結果を報告する
-      description: 受け取った応答の処理結果を送ると、カードが `done` に変わります。
+      summary: Report the result of handling a response
+      description: Send the result of handling a response, and the card changes to `done`.
       requestBody:
         required: true
         content:
@@ -170,7 +202,7 @@ paths:
               $ref: "#/components/schemas/ActionResult"
       responses:
         "204":
-          description: 記録済み
+          description: Recorded
         "401": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
@@ -184,8 +216,8 @@ paths:
     post:
       tags: [Alerts]
       operationId: resolveAlert
-      summary: アラートを解消する
-      description: 同じ `alert_key` の未解消アラートを閉じ、全員の対応タブから外します。対象がなくても `202` を返します。
+      summary: Resolve an alert
+      description: Closes open alerts with the same `alert_key` and removes them from everyone's Action tab. Returns `202` even if there is nothing to resolve.
       requestBody:
         content:
           application/json:
@@ -198,7 +230,7 @@ paths:
                   maxLength: 200
       responses:
         "202":
-          description: 受付済み
+          description: Accepted
         "401": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/RateLimited" }
   /v1/heartbeats/{name}:
@@ -211,10 +243,10 @@ paths:
     post:
       tags: [Heartbeats]
       operationId: reportHeartbeat
-      summary: 定期ジョブの生存を報告する
+      summary: Report that a scheduled job is alive
       description: |
-        `interval` と `grace` の秒数のうちに次の報告がなければ、チャンネルへ通知します。
-        途絶えた後に報告が届くと再開を知らせます。報告は送信数に数えません。チャンネルごとに20件までです。
+        If the next report does not arrive within `interval` plus `grace` seconds, the channel is notified.
+        If a report arrives after an outage, the channel is told that reports have resumed. Reports do not count as sent messages. Limit of 20 per channel.
       requestBody:
         required: true
         content:
@@ -232,10 +264,10 @@ paths:
                   type: integer
                   minimum: 0
                   maximum: 2678400
-                  description: 省略すると `interval` の10%です。60秒を下回りません。
+                  description: Defaults to 10% of `interval`, and is never less than 60 seconds.
       responses:
         "200":
-          description: 記録済み
+          description: Recorded
           content:
             application/json:
               schema:
@@ -253,19 +285,19 @@ paths:
     delete:
       tags: [Heartbeats]
       operationId: deleteHeartbeat
-      summary: 見張りを止める
+      summary: Stop monitoring a heartbeat
       responses:
         "204":
-          description: 削除済み
+          description: Deleted
         "401": { $ref: "#/components/responses/Problem" }
   /v1/actions/events:
     get:
       tags: [Actions]
       operationId: listActionEvents
-      summary: 応答イベントを取得する
+      summary: Get response events
       description: |
-        callbackを受けられないサービスが使います。`next_cursor` を次の `cursor` に渡します。
-        書き込み順の入れ替わりで読み飛ばさないよう、発生から2秒以内のイベントは次回に返します。
+        For services that cannot receive callbacks. Pass `next_cursor` as the next `cursor`.
+        To avoid skipping events when writes land out of order, events less than 2 seconds old are held for the next fetch.
       security:
         - readKey: []
       parameters:
@@ -282,10 +314,10 @@ paths:
             default: 50
       responses:
         "200":
-          description: イベントの一覧
+          description: List of events
           headers:
             Retry-After:
-              description: 次に取得するまでの秒数
+              description: Seconds until the next fetch
               schema:
                 type: integer
           content:
@@ -309,24 +341,29 @@ paths:
         required: true
         schema:
           type: string
-          enum: [slack, grafana, alertmanager, generic]
+          enum: [slack, grafana, alertmanager, generic, datadog, sentry, pagerduty]
       - name: inbound_key
         in: path
         required: true
-        description: チャンネル専用の受信キー。アクセスログには残しません。
+        description: Inbound key for one channel. Not written to access logs.
         schema:
           type: string
     post:
       tags: [Inbound]
       operationId: receiveInbound
-      summary: 外部サービスの通知を受ける
+      summary: Receive a notification from an external service
       description: |
-        `slack` は Incoming Webhook の `text` を読み取ります。
-        `grafana` と `alertmanager` は発火を `alert`、回復を解消へ変換し、
-        fingerprint を `alert_key` と `dedupe_key` に使います。fingerprint がなければラベルから導きます。
-        1回で発火は20件まで届け、超えた分は件数をまとめた1件にします。
-        `generic` は `MessageCreate` と同じ形式で、`notice`、`progress`、`alert` だけを受け付けます。
-        本文は256KBまでです。
+        `slack` reads the `text` field of an Incoming Webhook.
+        `grafana` and `alertmanager` convert firing to `alert` and recovery to resolve,
+        and use the fingerprint as `alert_key` and `dedupe_key`. If there is no fingerprint, it is derived from the labels.
+        One request delivers up to 20 firing alerts. Any beyond that are combined into one message with the count.
+        `generic` uses the same format as `MessageCreate` and accepts only `notice`, `progress`, and `alert`.
+        `datadog` reads `alert_id`, `scope`, `title`, `message`, `transition`, `priority`, and `url` from the webhook payload you
+        configure. `transition: Recovered` resolves the alert.
+        `sentry` reads issue, event alert, and metric alert webhooks, and the legacy WebHooks plugin.
+        `pagerduty` reads V3 webhooks. `incident.triggered` and `incident.reopened` create an alert, and `incident.resolved` resolves it.
+        These three return `202` without creating a message for events they do not use.
+        The request body is limited to 256 KB.
       security: []
       requestBody:
         required: true
@@ -336,7 +373,7 @@ paths:
               type: object
       responses:
         "202":
-          description: 受付済み
+          description: Accepted
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "413": { $ref: "#/components/responses/Problem" }
@@ -347,11 +384,11 @@ paths:
     get:
       tags: [Meta]
       operationId: getMeta
-      summary: サービスの状態を取得する
+      summary: Get service status
       security: []
       responses:
         "200":
-          description: 現在の運転モード
+          description: Current operating mode
           content:
             application/json:
               schema:
@@ -359,21 +396,21 @@ paths:
 webhooks:
   actionEvent:
     post:
-      summary: 応答や状態の変化を受け取る
+      summary: Receive responses and state changes
       description: |
-        チャンネルに登録し、所有確認を済ませたURLへ送ります。
-        `2xx` 以外と10秒のタイムアウトは失敗とし、1分、5分、30分と間隔を空けて最長24時間再送します。
-        リダイレクトは追いません。同じイベントが複数回届く場合があるので `Nodd-Event-Id` で重複を除きます。
+        Sent to a URL that is registered on the channel and has passed the ownership check.
+        Any non-`2xx` response or a 10-second timeout counts as a failure. Retries are sent after 1 minute, 5 minutes, 30 minutes, and so on, for up to 24 hours.
+        Redirects are not followed. The same event can arrive more than once, so deduplicate with `Nodd-Event-Id`.
 
-        登録時は `{"type":"verification","challenge":"..."}` を署名なしで送ります。
-        `2xx` の本文に `challenge` の値を含めて返したURLだけを登録します。
-        httpsの443番で、公開アドレスに解決できる名前付きホストだけを受け付けます。
+        At registration, `{"type":"verification","challenge":"..."}` is sent without a signature.
+        A URL is registered only if it returns a `2xx` response whose body contains the `challenge` value.
+        Only https on port 443 with a named host that resolves to a public address is accepted.
 
-        期限切れは応答の受付猶予10分が過ぎた後に通知します。
-        Teamでは、受け取り期限までに誰の受信も確認できなかった通知を `delivery.expired` で知らせます。
+        Expiry is reported after the 10-minute grace period for responses has passed.
+        On Team, `delivery.expired` reports a message that no one was confirmed to have received within the delivery window.
 
-        署名は `Nodd-Signature: t=<unix秒>,v1=<hex>` です。
-        `v1` は `<t>.<raw body>` のHMAC-SHA256で、受信側は5分より古い `t` を拒否します。
+        The signature format is `Nodd-Signature: t=<unix seconds>,v1=<hex>`.
+        `v1` is the HMAC-SHA256 of `<t>.<raw body>`. Receivers must reject a `t` older than 5 minutes.
       security: []
       parameters:
         - name: Nodd-Signature
@@ -394,21 +431,21 @@ webhooks:
               $ref: "#/components/schemas/ActionEvent"
       responses:
         "200":
-          description: 受領
+          description: Received
 components:
   securitySchemes:
     sendKey:
       type: http
       scheme: bearer
-      description: チャンネル専用の送信キー。`nodd_live_` または `nodd_test_` で始まり、末尾に検査値を持ちます。
+      description: Send key for one channel. Starts with `nodd_live_` or `nodd_test_` and ends with a check value.
     readKey:
       type: http
       scheme: bearer
-      description: 応答イベントを読むためのチャンネル専用キー。送信はできません。
+      description: Key for one channel that reads response events. It cannot send.
     replyToken:
       type: http
       scheme: bearer
-      description: 送信時に返す、その1通の状態だけを読めるトークン。
+      description: Token returned at send time that can read the state of that one message only.
   parameters:
     MessageId:
       name: id
@@ -420,27 +457,27 @@ components:
     IdempotencyKey:
       name: Idempotency-Key
       in: header
-      description: 再送時に二重送信を防ぐキー。24時間有効で、同じキーには最初の結果を返します。
+      description: Key that prevents duplicate sends on retry. Valid for 24 hours. The same key returns the first result.
       schema:
         type: string
         maxLength: 128
   headers:
     RateLimitRemaining:
-      description: 現在の時間枠で残っている送信数
+      description: Sends remaining in the current time window
       schema:
         type: integer
   responses:
     Problem:
-      description: エラー
+      description: Error
       content:
         application/problem+json:
           schema:
             $ref: "#/components/schemas/Problem"
     RateLimited:
-      description: "`rate_limited` または `monthly_limit`"
+      description: "`rate_limited` or `monthly_limit`"
       headers:
         Retry-After:
-          description: 再送までの秒数
+          description: Seconds until retry
           schema:
             type: integer
       content:
@@ -448,10 +485,10 @@ components:
           schema:
             $ref: "#/components/schemas/Problem"
     Unavailable:
-      description: "`maintenance` または `overloaded`"
+      description: "`maintenance` or `overloaded`"
       headers:
         Retry-After:
-          description: 再送までの秒数
+          description: Seconds until retry
           schema:
             type: integer
       content:
@@ -506,7 +543,7 @@ components:
     Audience:
       type: object
       additionalProperties: false
-      description: 省略するとチャンネルの全員に届きます。宛先の人にだけ対応タブの件数が増えます。
+      description: If omitted, the message goes to everyone in the channel. Only the addressed people see the Action tab count increase.
       properties:
         members:
           type: array
@@ -544,19 +581,42 @@ components:
         kind:
           type: string
           enum: [notice, progress, alert, approval, choice]
-          description: "`input` は次の版で追加します。"
+          description: "`input` will be added in a later version."
         level:
           type: string
           enum: [low, normal, high]
           default: normal
-          description: "`critical` は将来の予約です。iOSのPassive、Active、Time Sensitiveに対応します。"
+          description: "`critical` is reserved for future use. Levels map to iOS Passive, Active, and Time Sensitive."
         title:
           type: string
           minLength: 1
           maxLength: 120
         body:
           type: string
-          maxLength: 1000
+          maxLength: 4000
+          description: Up to 1,000 characters, or 4,000 when `format` is `markdown`.
+        format:
+          type: string
+          enum: [plain, markdown]
+          default: plain
+          description: |
+            `markdown` formats headings, lists, quotes, code, bold, italics, and links in the app. HTML, images, and tables are not
+            rendered, and only https links open. Notifications show the body without the markup.
+        image:
+          type: object
+          additionalProperties: false
+          description: |
+            A JPEG or PNG up to 40 KB. It travels inside the sealed message, so the same encryption and deletion apply as the body.
+            Not available on `progress`. The request can be up to 64 KB.
+          required: [data]
+          properties:
+            data:
+              type: string
+              description: Base64.
+            alt:
+              type: string
+              maxLength: 120
+              description: Text for screen readers.
         fields:
           type: array
           maxItems: 6
@@ -569,34 +629,70 @@ components:
             $ref: "#/components/schemas/Link"
         options:
           type: array
-          description: "`choice` では2〜4個を必須とします。`approval` では指定しません。"
+          description: "Required for `choice`, with 2 to 4 options. Do not set for `approval`."
           minItems: 2
           maxItems: 4
           items:
             $ref: "#/components/schemas/Option"
         confirm:
           type: boolean
-          description: "応答にFace IDを求めます。`approval` の既定は `true`、`choice` の既定は `false` です。"
+          description: "Requires Face ID to respond. Defaults to `true` for `approval` and `false` for `choice`."
         expires_in:
           type: integer
           minimum: 60
           maximum: 2592000
-          description: 応答期限までの秒数。プランの受け取り期限を超えられません。応答が必要な種類で省略すると受け取り期限になります。
+          description: Seconds until the response deadline. Cannot exceed the plan's delivery window. If omitted for a kind that needs a response, the delivery window is used.
         on_timeout:
           type: string
           enum: [reject, ignore]
           default: reject
-          description: 期限切れの扱い。サービスは未応答を承認として扱ってはいけません。
+          description: What to do on expiry. Services must not treat a missing response as approval.
         approvals_required:
           type: integer
           minimum: 1
           maximum: 3
-          description: "`approval` が確定するまでに必要な人数。2人以上はTeamだけです。同じ人は1人として数え、1人でも却下すると確定します。"
+          description: "Number of people needed to finalize an `approval`. Two or more requires Team. The same person counts once, and one rejection finalizes it."
+        input:
+          type: object
+          additionalProperties: false
+          description: |
+            Show a text field on an `approval` or `choice` answered by one person. The text comes back in `response.note`.
+            Without this field, the only text a responder can send is a reason for rejecting.
+          required: [prompt]
+          properties:
+            prompt:
+              type: string
+              minLength: 1
+              maxLength: 40
+              description: Label above the text field.
+            required:
+              type: boolean
+              default: false
+              description: Refuse responses without text. iOS app 1.0 cannot show the field, so it cannot answer these messages.
+        secret:
+          type: object
+          additionalProperties: false
+          description: |
+            Ask for a password or other secret on an `approval`. The app shows a masked field, always requires Face ID, and seals
+            the value to `public_key` with HPKE (DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305), using the info string
+            `nod-secret-v1` and the message ID as additional data. The sealed value is base64(enc || ciphertext).
+
+            Generate a new key pair for each message and keep the private key out of logs. Read the value with
+            `GET /v1/messages/{id}/secret`. It is not in `response`, `/v1/actions/events`, or callbacks.
+            The server cannot read the value, but it does relay `public_key`, so this does not protect against a compromised server.
+
+            Cannot be combined with `input`, `dedupe_key`, `confirm: false`, or more than one approver.
+            iOS app 1.0 cannot show the field, so it can only reject these messages.
+          required: [public_key]
+          properties:
+            public_key:
+              type: string
+              description: X25519 public key, Base64.
         escalate_after:
           type: integer
           minimum: 60
           maximum: 2592000
-          description: この秒数のあいだ応答がなければ、通知を切っている担当にも知らせ、`action.escalated` を記録します。応答期限より短くします。Teamだけです。
+          description: If no one responds for this many seconds, responders who have turned off notifications are also alerted, and `action.escalated` is recorded. Must be shorter than the response deadline. Team only.
         escalate_to:
           $ref: "#/components/schemas/Audience"
         alert_key:
@@ -604,7 +700,7 @@ components:
         dedupe_key:
           type: string
           maxLength: 128
-          description: 未解決の同じキーを1件にまとめ、回数を数えます。上限には数えません。
+          description: Combines unresolved messages with the same key into one and counts them. These do not count toward limits.
         progress:
           $ref: "#/components/schemas/Progress"
         to:
@@ -612,15 +708,15 @@ components:
         sensitive:
           type: boolean
           default: false
-          description: ロック画面に本文を出しません。
+          description: Hides the message content on the lock screen.
         delivery:
           type: string
           enum: [immediate, digest]
           default: immediate
-          description: "`digest` は1時間ごとのまとめ通知へ回します。`low` だけ指定できます。本文はその間も同期で取得できます。"
+          description: "`digest` holds the message for the hourly digest notification. Allowed only for `low`. The content can still be fetched by sync in the meantime."
         metadata:
           type: object
-          description: 応答イベントにそのまま返す値。1KBまでです。
+          description: Values returned as is in response events. Up to 1 KB.
           additionalProperties:
             type: string
     MessageUpdate:
@@ -660,7 +756,7 @@ components:
       properties:
         option_id:
           type: string
-          description: "`approval` では `approve` か `reject` です。"
+          description: "For `approval`, this is `approve` or `reject`."
         actor:
           type: object
           required: [id, display_name]
@@ -675,14 +771,17 @@ components:
         responded_at:
           type: string
           format: date-time
-          description: 端末が署名した時刻です。
+          description: Time signed by the device.
         note:
           type: string
           maxLength: 200
-          description: 応答した人が書いた却下の理由などです。署名の対象に含みます。
+          description: Text written by the responder, either a reason for rejecting or the answer to `input`. Covered by the signature. It is not sealed, so use `secret` to ask for secrets.
+        secret_digest:
+          type: string
+          description: Lowercase hex SHA-256 of the sealed secret, as Base64 text. Present only on responses to `secret`, and covered by the signature.
         signature:
           type: object
-          description: サーバーを信用せずに検証できる端末の署名です。
+          description: Device signature that can be verified without trusting the server.
           required: [alg, key_id, value, nonce]
           properties:
             alg:
@@ -694,10 +793,10 @@ components:
               type: string
             nonce:
               type: string
-              description: 署名対象に含まれる値です。`responded_at` は端末が署名した文字列のまま返します。
+              description: Value included in the signed data. `responded_at` is returned as the exact string the device signed.
     Delivery:
       type: object
-      description: 推定値です。`unconfirmed` は届いていないという意味ではありません。
+      description: Estimates. `unconfirmed` does not mean the message was not delivered.
       properties:
         confirmed:
           type: integer
@@ -717,8 +816,8 @@ components:
           type: string
         source:
           type: string
-          description: サーバーが記録する経路です。送信者は指定できません。
-          enum: [api, cli, github_action, mcp, slack, grafana, alertmanager, generic]
+          description: Path recorded by the server. Senders cannot set it.
+          enum: [api, cli, github_action, mcp, slack, grafana, alertmanager, generic, datadog, sentry, pagerduty]
         sent_at:
           type: string
           format: date-time
@@ -731,10 +830,10 @@ components:
           $ref: "#/components/schemas/Response"
         approvals_required:
           type: integer
-          description: 確定に要る承認の人数です。
+          description: Number of approvals needed to finalize.
         approvals:
           type: array
-          description: 確定より前に集まった承認です。
+          description: Approvals collected before finalizing.
           items:
             $ref: "#/components/schemas/Response"
         delivery:
@@ -776,7 +875,7 @@ components:
         on_timeout:
           type: string
           enum: [reject, ignore]
-          description: "`action.expired` だけに付きます。送信時に指定した扱いです。"
+          description: "Present only on `action.expired`. The handling set at send time."
     Problem:
       type: object
       required: [type, title, status, code]

@@ -34,13 +34,43 @@ nodd ask "Deploy to production?"
 
 In CI, set `NODD_KEY` instead of logging in.
 
+## Messages
+
+`nodd send` and `nodd ask` can format the body and attach a small image.
+
+```sh
+nodd send "Nightly report" --markdown --body - < report.md
+
+nodd send "Error rate" --image graph.png --image-alt "Errors over the last hour"
+```
+
+`--markdown` allows up to 4,000 characters. `--image` takes a JPEG or PNG up to 40 KB.
+
+## Text and secrets
+
+`--input` asks for up to 200 characters of text. The answer goes to standard error as `Note:` and is in `--json` output. It is not encrypted to devices, so never use it for secrets.
+
+```sh
+nodd ask "Roll back?" --input "Which version?" --input-required
+```
+
+`--secret` asks for a password or other secret in a masked field. The value is sealed to a key that exists only for this run, so the server cannot read it. It is removed from the server when read, or after 10 minutes.
+
+```sh
+nodd ask "Production DB password" --secret --env PGPASSWORD -- psql -h db.example.com app
+```
+
+With `--env`, the command runs only on approval, and the value goes to the command alone. Without `--env`, `nodd` prints the value to standard output, and it refuses to print to a terminal. Use `--env` with agents so the value never reaches the model.
+
+Sealing protects the value from storage on the server, not from a compromised server, because the public key passes through it. Answering `--input` or `--secret` needs Nodd 1.1 or later.
+
 ## Agents
 
 ```sh
 claude mcp add nodd -- nodd mcp
 ```
 
-`nodd mcp` provides `notify`, `ask`, and `check_answer`. A model can ignore MCP answers, so use the hook to enforce approval:
+`nodd mcp` provides `notify`, `ask`, and `check_answer`. There is no MCP tool for secrets. A model can ignore MCP answers, so use the hook to enforce approval:
 
 ```json
 {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "nodd hook", "timeout": 1260}]}]}}

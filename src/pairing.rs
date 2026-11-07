@@ -1,4 +1,4 @@
-//! ログイン。送信キーはこの実行だけの鍵で封緘されて届く。
+//! ログインと秘密の値の受け取り。どちらもこの実行だけの鍵で封緘されて届く。
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hpke::{aead::ChaCha20Poly1305, kdf::HkdfSha256, kem::X25519HkdfSha256, Deserializable, Kem, OpModeR, Serializable};
@@ -6,6 +6,7 @@ use qrcode::{render::unicode, QrCode};
 use rand::{rngs::StdRng, SeedableRng};
 
 const INFO: &[u8] = b"nod-message-v1";
+const SECRET_INFO: &[u8] = b"nod-secret-v1";
 
 pub struct PairingKey {
     private: <X25519HkdfSha256 as Kem>::PrivateKey,
@@ -23,6 +24,15 @@ impl PairingKey {
     }
 
     pub fn open(&self, sealed: &str, code: &str) -> Result<String, String> {
+        self.open_as(INFO, sealed, code)
+    }
+
+    /// 端末が封緘した値を開く。通知のIDを含めて封緘するので、別の問い合わせの値は開けない。
+    pub fn open_secret(&self, sealed: &str, message_id: &str) -> Result<String, String> {
+        self.open_as(SECRET_INFO, sealed, message_id)
+    }
+
+    fn open_as(&self, info: &[u8], sealed: &str, aad: &str) -> Result<String, String> {
         let bytes = STANDARD.decode(sealed).map_err(|e| e.to_string())?;
         if bytes.len() <= 32 {
             return Err("The received key is malformed".to_string());
@@ -33,9 +43,9 @@ impl PairingKey {
             &OpModeR::Base,
             &self.private,
             &enc,
-            INFO,
+            info,
             ciphertext,
-            code.as_bytes(),
+            aad.as_bytes(),
         )
         .map_err(|e| e.to_string())?;
         String::from_utf8(plain).map_err(|e| e.to_string())
@@ -61,10 +71,14 @@ mod tests {
 
     /// サーバーの封緘と同じ手順。
     fn seal(key: &PairingKey, code: &str, plaintext: &[u8]) -> String {
+        seal_as(key, INFO, code, plaintext)
+    }
+
+    fn seal_as(key: &PairingKey, info: &[u8], code: &str, plaintext: &[u8]) -> String {
         let (enc, ciphertext) = hpke::single_shot_seal::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256, _>(
             &OpModeS::Base,
             &key.public,
-            INFO,
+            info,
             plaintext,
             code.as_bytes(),
             &mut StdRng::from_entropy(),
@@ -82,6 +96,15 @@ mod tests {
         assert_eq!(key.open(&sealed, "code1").unwrap(), "nodd_test_s_abc");
         assert!(key.open(&sealed, "code2").is_err());
         assert!(PairingKey::generate().open(&sealed, "code1").is_err());
+    }
+
+    #[test]
+    fn secret_opens_only_for_its_message() {
+        let key = PairingKey::generate();
+        let sealed = seal_as(&key, SECRET_INFO, "msg_1", "pass*word".as_bytes());
+        assert_eq!(key.open_secret(&sealed, "msg_1").unwrap(), "pass*word");
+        assert!(key.open_secret(&sealed, "msg_2").is_err());
+        assert!(key.open(&sealed, "msg_1").is_err());
     }
 
     #[test]
